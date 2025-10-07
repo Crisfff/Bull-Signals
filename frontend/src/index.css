@@ -2,10 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Aseguramos que ocupe toda la altura y use fondo oscuro */
+/* 🎨 Estilos base del sitio */
 html, body, #root {
   height: 100%;
-  background-color: #0b0f19; /* tono oscuro elegante */
-  color: #e5e7eb; /* texto claro */
+  background-color: #0b1220; /* Fondo oscuro */
+  color: #e5ecf6;            /* Texto claro */
   font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+button {
+  transition: background-color 0.2s, transform 0.1s;
+}
+button:active {
+  transform: scale(0.97);
 }
