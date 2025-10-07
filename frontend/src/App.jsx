@@ -1,104 +1,163 @@
-import React, { useEffect, useState } from "react";
-import { getDatabase, ref, onValue } from "firebase/database";
-import { initializeApp } from "firebase/app";
+import React, { useEffect, useMemo, useState } from "react";
 
-// ⚙️ Configura Firebase (coloca tus valores reales en el .env)
-const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FB_API_KEY,
-  authDomain: import.meta.env.VITE_FB_AUTH_DOMAIN,
-  databaseURL: import.meta.env.VITE_FB_DB_URL,
-  projectId: import.meta.env.VITE_FB_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FB_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FB_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FB_APP_ID,
-};
+const BASE = import.meta.env.VITE_WORKER_BASE?.replace(/\/+$/, "") || "";
 
-// Inicializa Firebase
-const app = initializeApp(firebaseConfig);
-const db = getDatabase(app);
+async function jsonGet(path) {
+  const r = await fetch(`${BASE}${path}`);
+  if (!r.ok) throw new Error(`${path} -> ${r.status}`);
+  return r.json();
+}
+async function jsonPost(path, body) {
+  const r = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  if (!r.ok) throw new Error(`${path} -> ${r.status}`);
+  return r.json();
+}
+
+function Badge({ children, color = "bg-zinc-700/60" }) {
+  return (
+    <span className={`px-2 py-0.5 rounded-lg text-xs ${color}`}>{children}</span>
+  );
+}
+
+function Card({ children }) {
+  return (
+    <div className="bg-card/70 border border-zinc-800 rounded-2xl p-4 shadow-sm">
+      {children}
+    </div>
+  );
+}
 
 export default function App() {
+  const [loadingAsk, setLoadingAsk] = useState(false);
   const [openSignals, setOpenSignals] = useState([]);
   const [closedSignals, setClosedSignals] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [health, setHealth] = useState(null);
+  const [error, setError] = useState("");
 
-  // 🧠 Suscripción en tiempo real a señales
+  // Carga inicial + polling cada 10s
   useEffect(() => {
-    const openRef = ref(db, "signals/BTCUSDT/open");
-    const closedRef = ref(db, "signals/BTCUSDT/closed");
+    let alive = true;
 
-    onValue(openRef, (snap) => {
-      const val = snap.val() || {};
-      const arr = Object.entries(val).map(([id, s]) => ({ id, ...s }));
-      setOpenSignals(arr.reverse());
-    });
+    const loadAll = async () => {
+      try {
+        setError("");
+        const [h, open, closed] = await Promise.all([
+          jsonGet("/health").catch(() => null),
+          jsonGet("/signals-open"),
+          jsonGet("/signals-closed"),
+        ]);
 
-    onValue(closedRef, (snap) => {
-      const val = snap.val() || {};
-      const arr = Object.entries(val).map(([id, s]) => ({ id, ...s }));
-      setClosedSignals(arr.reverse());
-    });
+        if (!alive) return;
+
+        setHealth(h);
+        setOpenSignals(normalizeList(open));
+        setClosedSignals(normalizeList(closed));
+      } catch (e) {
+        if (!alive) return;
+        setError(e.message || "Error cargando datos");
+      }
+    };
+
+    loadAll();
+    const iv = setInterval(loadAll, 10_000);
+    return () => {
+      alive = false;
+      clearInterval(iv);
+    };
   }, []);
 
-  // 🚀 Pedir señal al worker
   const pedirSenal = async () => {
     try {
-      setLoading(true);
-      const res = await fetch(`${import.meta.env.VITE_WORKER_BASE}/ask`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ leverage: 20 }),
-      });
-      const data = await res.json();
-      if (data.noTrade) {
-        alert("Sin señal: NO-TRADE");
+      setLoadingAsk(true);
+      setError("");
+      const res = await jsonPost("/ask", { leverage: 20 });
+      // refrescar listas tras pedir
+      try {
+        const [open, closed] = await Promise.all([
+          jsonGet("/signals-open"),
+          jsonGet("/signals-closed"),
+        ]);
+        setOpenSignals(normalizeList(open));
+        setClosedSignals(normalizeList(closed));
+      } catch {}
+      if (res?.noTrade) {
+        alert("No-Trade (umbral no alcanzado).");
+      } else if (res?.payload?.signal) {
+        alert(`✅ Señal abierta: ${res.payload.signal}`);
       } else {
-        alert(`Señal abierta: ${data.payload.signal}`);
+        alert("Respuesta recibida.");
       }
     } catch (e) {
-      alert("Error al pedir señal");
-      console.error(e);
+      setError(e.message || "Error al pedir señal");
     } finally {
-      setLoading(false);
+      setLoadingAsk(false);
     }
   };
 
+  const baseOk = useMemo(() => Boolean(BASE), []);
+
   return (
-    <div className="max-w-5xl mx-auto p-4">
+    <div className="max-w-6xl mx-auto p-4">
       <header className="flex items-center justify-between py-6">
-        <h1 className="text-2xl font-bold">🐂 Bull Signals</h1>
-        <button
-          onClick={pedirSenal}
-          disabled={loading}
-          className="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-xl font-semibold"
-        >
-          {loading ? "Cargando..." : "Pedir señal"}
-        </button>
+        <div>
+          <h1 className="text-2xl font-bold text-accent">🐂 Bull Signals</h1>
+          <p className="text-sm text-zinc-400">
+            Backend: {baseOk ? (
+              <a href={BASE + "/health"} target="_blank" className="underline">
+                {BASE}
+              </a>
+            ) : (
+              <span className="text-red-400">VITE_WORKER_BASE no definido</span>
+            )}
+          </p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {health ? (
+            <Badge color="bg-emerald-700/60">OK</Badge>
+          ) : (
+            <Badge color="bg-yellow-700/60">SIN HEALTH</Badge>
+          )}
+          <button
+            onClick={pedirSenal}
+            disabled={loadingAsk || !baseOk}
+            className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 px-4 py-2 rounded-xl font-semibold"
+          >
+            {loadingAsk ? "Pidiendo..." : "Pedir señal"}
+          </button>
+        </div>
       </header>
 
-      <main className="grid md:grid-cols-2 gap-6 mt-6">
+      {error && (
+        <Card>
+          <p className="text-red-400 text-sm">⚠️ {error}</p>
+        </Card>
+      )}
+
+      <div className="grid md:grid-cols-2 gap-6 mt-6">
         <section>
-          <h2 className="text-lg font-semibold mb-2">📈 Señales abiertas</h2>
+          <h2 className="text-lg font-semibold mb-2">📊 Señales abiertas</h2>
           {openSignals.length === 0 ? (
-            <p className="text-sm text-zinc-400">Ninguna señal abierta</p>
+            <p className="text-sm text-muted">Ninguna señal abierta</p>
           ) : (
             <div className="space-y-3">
               {openSignals.map((s) => (
-                <div
-                  key={s.id}
-                  className="bg-zinc-900 p-4 rounded-2xl border border-zinc-800"
-                >
-                  <div className="flex justify-between items-center">
-                    <span className="font-semibold">{s.signal}</span>
-                    <span className="text-sm text-zinc-400">
-                      {s.time_open?.slice(0, 19).replace("T", " ")}
-                    </span>
+                <Card key={s.id}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Badge color="bg-emerald-700/60">{s.signal}</Badge>
+                      <span className="text-xs text-zinc-400">{s.time_open}</span>
+                    </div>
+                    <span className="text-xs text-zinc-400">prob: {(s.probability ?? 0).toFixed?.(3) ?? s.probability}</span>
                   </div>
-                  <p className="text-sm mt-1">
-                    <span className="text-zinc-400">Entrada:</span>{" "}
-                    {s.entry_price} | TP: {s.tp_price} | SL: {s.sl_price}
-                  </p>
-                </div>
+                  <div className="mt-2 text-sm">
+                    Entrada: <b>{fmt(s.entry_price)}</b> &nbsp;·&nbsp; TP: <b>{fmt(s.tp_price)}</b> &nbsp;·&nbsp; SL: <b>{fmt(s.sl_price)}</b>
+                  </div>
+                </Card>
               ))}
             </div>
           )}
@@ -107,30 +166,47 @@ export default function App() {
         <section>
           <h2 className="text-lg font-semibold mb-2">✅ Cerradas</h2>
           {closedSignals.length === 0 ? (
-            <p className="text-sm text-zinc-400">Nada cerrado aún</p>
+            <p className="text-sm text-muted">Nada cerrado aún</p>
           ) : (
             <div className="space-y-3">
               {closedSignals.map((s) => (
-                <div
-                  key={s.id}
-                  className="bg-zinc-900 p-4 rounded-2xl border border-zinc-800"
-                >
-                  <div className="flex justify-between items-center">
-                    <span className="font-semibold">{s.signal}</span>
-                    <span className="text-sm text-zinc-400">
-                      {s.time_close?.slice(0, 19).replace("T", " ")}
-                    </span>
+                <Card key={s.id}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Badge color={s.reason === "TP" ? "bg-emerald-700/60" : "bg-red-700/60"}>
+                        {s.reason || "CERRADA"}
+                      </Badge>
+                      <span className="text-xs text-zinc-400">{s.time_close}</span>
+                    </div>
+                    <span className="text-xs text-zinc-400">{s.signal}</span>
                   </div>
-                  <p className="text-sm mt-1">
-                    <span className="text-zinc-400">Salida:</span>{" "}
-                    {s.exit_price} ({s.reason})
-                  </p>
-                </div>
+                  <div className="mt-2 text-sm">
+                    Salida: <b>{fmt(s.exit_price)}</b> &nbsp;·&nbsp; Entrada: <b>{fmt(s.entry_price)}</b>
+                  </div>
+                </Card>
               ))}
             </div>
           )}
         </section>
-      </main>
+      </div>
     </div>
   );
+}
+
+// ------- helpers -------
+function fmt(v) {
+  if (v === undefined || v === null) return "-";
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toLocaleString("en-US") : String(v);
+}
+
+function normalizeList(apiRes) {
+  // Acepta {items:[...]} o {...id:obj}
+  if (!apiRes) return [];
+  if (Array.isArray(apiRes)) return apiRes;
+  if (Array.isArray(apiRes.items)) return apiRes.items;
+  const obj = apiRes;
+  return Object.keys(obj)
+    .map((id) => ({ id, ...obj[id] }))
+    .sort((a, b) => String(b.time_open || "").localeCompare(String(a.time_open || "")));
 }
