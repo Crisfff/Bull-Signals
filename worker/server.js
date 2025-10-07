@@ -8,7 +8,7 @@ const SYMBOL     = process.env.VITE_SYMBOL || "BTCUSDT";         // para Firebas
 const KU_SYMBOL  = "BTC-USDT";                                   // formato KuCoin
 const TIMEFRAME  = process.env.VITE_TIMEFRAME || "1h";
 const HF_BASE    = process.env.VITE_HF_API_BASE;                 // p.ej. 
-https://crisdeyvid-bull-trade.hf.space/signal
+https://crisdeyvid-bull-trade.hf.space
 const THRESHOLD  = parseFloat(process.env.VITE_THRESHOLD || "0.7");
 const TP_PCT     = parseFloat(process.env.VITE_TP_PCT || "0.01");
 const SL_PCT     = parseFloat(process.env.VITE_SL_PCT || "0.02");
