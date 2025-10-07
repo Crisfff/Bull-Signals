@@ -1,55 +1,62 @@
-// Bull Signals (Render) — simple y directo
+// ============================================================
+// Bull Signals (Render) — versión estable
+// ------------------------------------------------------------
 // - Calcula features desde KuCoin (sin API keys)
 // - Pide señal al Space de Hugging Face
 // - Guarda en Firebase (RTDB)
-// - Vigila TP/SL cada 60s
+// - Supervisa TP/SL cada 60s automáticamente
+// ============================================================
 
 import express from "express";
 import cors from "cors";
 import admin from "firebase-admin";
-import { fetch } from "undici";
+import fetch from "node-fetch"; // 🔥 usa node-fetch (Render lo soporta bien)
 
 // ====== ENV ======
-const PORT       = process.env.PORT || 8080;
-const HF_SIGNAL  = process.env.HF_SIGNAL_URL || "https://crisdeyvid-bull-trade.hf.space/signal";
-const FB_DB_URL  = process.env.FIREBASE_DB_URL;
-const SA_JSON    = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-const SYMBOL     = process.env.SYMBOL || "BTCUSDT";
-const KU_SYMBOL  = process.env.KU_SYMBOL || "BTC-USDT";
-const THRESHOLD  = parseFloat(process.env.THRESHOLD || "0.7");
+const PORT = process.env.PORT || 8080;
+const HF_SIGNAL_URL =
+  process.env.HF_SIGNAL_URL ||
+  "https://crisdeyvid-bull-trade.hf.space/signal";
+const FIREBASE_DB_URL = process.env.FIREBASE_DB_URL;
+const SERVICE_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+const SYMBOL = process.env.SYMBOL || "BTCUSDT";
+const KU_SYMBOL = process.env.KU_SYMBOL || "BTC-USDT";
+const THRESHOLD = parseFloat(process.env.THRESHOLD || "0.7");
 
-// ====== Firebase init (solo aquí) ======
-if (!FB_DB_URL || !SA_JSON) {
-  console.error("Faltan FIREBASE_DB_URL o GOOGLE_SERVICE_ACCOUNT_JSON");
+// ====== Seguridad y Firebase init ======
+if (!FIREBASE_DB_URL || !SERVICE_JSON) {
+  console.error("❌ Faltan FIREBASE_DB_URL o GOOGLE_SERVICE_ACCOUNT_JSON");
   process.exit(1);
 }
-let serviceAccount;
+
+let svc;
 try {
-  serviceAccount = JSON.parse(SA_JSON);
+  svc = JSON.parse(SERVICE_JSON);
+  if (!svc.client_email || !svc.private_key) throw new Error("Campos faltantes");
 } catch (e) {
-  console.error("GOOGLE_SERVICE_ACCOUNT_JSON inválido:", e.message);
+  console.error("❌ Error parseando SERVICE JSON:", e.message);
   process.exit(1);
 }
+
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: FB_DB_URL
+  credential: admin.credential.cert(svc),
+  databaseURL: FIREBASE_DB_URL,
 });
 const db = admin.database();
 
-// ====== Express ======
+// ====== App ======
 const app = express();
-app.use(cors());
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// ====== KuCoin utils ======
+// ====== Utilidades KuCoin ======
 async function getKuCoinCandles(symbol = KU_SYMBOL, type = "1hour", limit = 300) {
   const url = `https://api.kucoin.com/api/v1/market/candles?type=${type}&symbol=${symbol}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error(`KuCoin ${r.status}`);
   const j = await r.json();
-  // data: [time,open,close,high,low,volume,turnover], newest first
   const rows = (j.data || [])
-    .map(a => ({
+    .map((a) => ({
       ts: Number(a[0]) * 1000,
       open: Number(a[1]),
       close: Number(a[2]),
@@ -61,6 +68,7 @@ async function getKuCoinCandles(symbol = KU_SYMBOL, type = "1hour", limit = 300)
   return rows.slice(-limit);
 }
 
+// ====== Indicadores ======
 function ema(series, period) {
   if (!series.length) return [];
   const k = 2 / (period + 1);
@@ -77,7 +85,8 @@ function ema(series, period) {
 
 function rsi(series, period = 14) {
   if (series.length < period + 1) return series.map(() => NaN);
-  const gains = [], losses = [];
+  const gains = [],
+    losses = [];
   for (let i = 1; i < series.length; i++) {
     const ch = series[i] - series[i - 1];
     gains.push(Math.max(ch, 0));
@@ -115,20 +124,21 @@ function stochOsc(highs, lows, closes, kP = 14, dP = 3) {
   return { k, d };
 }
 
+// ====== Features ======
 async function buildFeatures() {
   const candles = await getKuCoinCandles(KU_SYMBOL, "1hour", 300);
   if (!candles.length) throw new Error("Sin velas");
 
-  const closes = candles.map(c => c.close);
-  const highs  = candles.map(c => c.high);
-  const lows   = candles.map(c => c.low);
+  const closes = candles.map((c) => c.close);
+  const highs = candles.map((c) => c.high);
+  const lows = candles.map((c) => c.low);
 
-  const ema9  = ema(closes, 9);
+  const ema9 = ema(closes, 9);
   const ema20 = ema(closes, 20);
   const rsi14 = rsi(closes, 14);
   const { k: stoch_k, d: stoch_d } = stochOsc(highs, lows, closes, 14, 3);
 
-  const c  = closes.at(-1);
+  const c = closes.at(-1);
   const c1 = closes.at(-2) ?? c;
   const c5 = closes.at(-6) ?? c;
 
@@ -141,26 +151,27 @@ async function buildFeatures() {
     stoch_k: Number(stoch_k.at(-1)?.toFixed(2) ?? 0),
     stoch_d: Number(stoch_d.at(-1)?.toFixed(2) ?? 0),
     price_gt_ema20: c > ema20.at(-1) ? 1 : 0,
-    ema9_gt_ema20:  ema9.at(-1) > ema20.at(-1) ? 1 : 0,
-    timestamp: Math.floor(Date.now() / 1000)
+    ema9_gt_ema20: ema9.at(-1) > ema20.at(-1) ? 1 : 0,
+    timestamp: Math.floor(Date.now() / 1000),
   };
 
   return { features: feat, lastPrice: c };
 }
 
-// ====== HuggingFace call ======
+// ====== Hugging Face call ======
 async function askHF(features, thr = THRESHOLD) {
-  const r = await fetch(HF_SIGNAL, {
+  const body = JSON.stringify({ features, threshold: thr });
+  const r = await fetch(HF_SIGNAL_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ features, threshold: thr })
+    body,
   });
-  if (!r.ok) throw new Error(`HF ${r.status}`);
+  if (!r.ok) throw new Error(`HF error ${r.status}`);
   return r.json();
 }
 
 // ====== Firebase helpers ======
-const openRef   = () => db.ref(`signals/${SYMBOL}/open`);
+const openRef = () => db.ref(`signals/${SYMBOL}/open`);
 const closedRef = () => db.ref(`signals/${SYMBOL}/closed`);
 
 async function addOpen(payload) {
@@ -173,34 +184,32 @@ async function closeSignal(id, exit_price, reason = "TP/SL") {
   const srcRef = openRef().child(id);
   const snap = await srcRef.get();
   if (!snap.exists()) return;
-
   const data = snap.val();
-  data.status     = "closed";
+  data.status = "closed";
   data.exit_price = exit_price;
-  data.reason     = reason;
+  data.reason = reason;
   data.time_close = new Date().toISOString();
-
   await closedRef().child(id).set(data);
   await srcRef.remove();
 }
 
-// ====== Watcher TP/SL (60s) ======
+// ====== Watcher TP/SL ======
 async function checkOpenSignals() {
   try {
     const snap = await openRef().get();
     if (!snap.exists()) return;
     const open = snap.val();
-
     const { lastPrice } = await buildFeatures();
 
     for (const id of Object.keys(open)) {
       const s = open[id];
       if (s.signal !== "CALL") continue;
-
       if (lastPrice >= s.tp_price) {
         await closeSignal(id, lastPrice, "TP");
+        console.log(`✅ TP alcanzado (${id})`);
       } else if (lastPrice <= s.sl_price) {
         await closeSignal(id, lastPrice, "SL");
+        console.log(`❌ SL alcanzado (${id})`);
       }
     }
   } catch (e) {
@@ -213,7 +222,13 @@ setInterval(checkOpenSignals, 60 * 1000);
 app.get("/health", async (_req, res) => {
   try {
     const { lastPrice } = await buildFeatures();
-    res.json({ status: "ok", symbol: SYMBOL, price: lastPrice, threshold: THRESHOLD, hf: HF_SIGNAL });
+    res.json({
+      status: "ok",
+      symbol: SYMBOL,
+      price: lastPrice,
+      threshold: THRESHOLD,
+      hf: HF_SIGNAL_URL,
+    });
   } catch (e) {
     res.status(500).json({ status: "error", error: e.message });
   }
@@ -234,7 +249,7 @@ app.post("/ask", async (req, res) => {
     const { features, lastPrice } = await buildFeatures();
     const hf = await askHF(features, THRESHOLD);
 
-    if (hf.signal !== "CALL") {
+    if (!hf || hf.signal !== "CALL") {
       return res.json({ noTrade: true, hf });
     }
 
@@ -254,20 +269,22 @@ app.post("/ask", async (req, res) => {
       entry_price: entry,
       tp_price: tp,
       sl_price: sl,
-      last_price: entry,
       leverage,
       status: "open",
       time_open: new Date().toISOString(),
-      features
+      features,
     };
 
     const id = await addOpen(payload);
+    console.log(`📈 Nueva señal abierta: ${id} (${payload.signal})`);
     res.json({ id, payload, hf });
   } catch (e) {
-    console.error("ask error:", e);
+    console.error("ask error:", e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ====== Start ======
-app.listen(PORT, () => console.log(`Bull worker listo en :${PORT}`));
+// ====== Inicia servidor ======
+app.listen(PORT, () =>
+  console.log(`🚀 Bull Signals backend corriendo en puerto ${PORT}`)
+);
